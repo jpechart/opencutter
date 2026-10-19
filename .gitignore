@@ -1,0 +1,28 @@
+# Build output
+app/target/
+dist/
+build-stage/
+*.jar
+!**/src/**
+
+# Local key material / secrets — NEVER commit (see NOTICE.md)
+config/keys.properties
+config/secrets.ini
+**/*.kek
+
+# Extracted native libraries
+**/jSerialComm.dll
+**/jnidispatch.dll
+.opencutter/
+
+# Captures / scratch
+captures/
+*.pcap
+*.jsonl
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.idea/
+*.iml
+.vscode/

@@ -1,0 +1,23 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build and test
+        run: mvn -B -f app/pom.xml package
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCutter-jar
+          path: app/target/OpenCutter.jar
