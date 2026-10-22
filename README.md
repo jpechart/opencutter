@@ -31,13 +31,16 @@ at that same point on the sheet. What you design is what it cuts.
 
 ## Quick start (just run it)
 
-If a packaged release is available:
+Grab the latest build from the **[Releases page](https://github.com/jpechart/opencutter/releases/latest)**:
 
-1. Download `OpenCutter-<version>-win64.zip`.
+1. Download **`OpenCutter-<version>-win64.zip`**.
 2. Right-click → **Extract All**.
 3. Open the `OpenCutter` folder and double-click **`OpenCutter.exe`**.
    - No Java needed — a runtime is bundled.
    - Windows SmartScreen may warn (the app is unsigned): **More info → Run anyway**.
+
+> Prefer to run the bare jar? The release also includes `OpenCutter.jar` — run it with
+> `java -jar OpenCutter.jar` (needs a JDK 21+). Or [build it yourself](#build-it-yourself).
 
 See **[docs/USAGE.md](docs/USAGE.md)** for connecting and cutting. A neutral test file is included at
 **[samples/sample-cut.pdf](samples/sample-cut.pdf)** (Letter-size, a `Cut Layer` with five shapes) so you

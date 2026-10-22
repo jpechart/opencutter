@@ -1,0 +1,77 @@
+name: release
+
+# Tag a version (e.g. v0.1.0) to build the downloads and publish a GitHub Release:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:        # also runnable by hand from the Actions tab
+
+permissions:
+  contents: write           # needed to create the Release and upload assets
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin   # includes jpackage
+          java-version: '21'
+          cache: maven
+
+      - name: Derive version
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build jar
+        run: mvn -B -f app/pom.xml clean package
+
+      - name: Build self-contained app (jpackage)
+        shell: bash
+        run: |
+          mkdir -p build-stage dist
+          cp app/target/OpenCutter.jar build-stage/OpenCutter.jar
+          jpackage \
+            --type app-image \
+            --name OpenCutter \
+            --input build-stage \
+            --main-jar OpenCutter.jar \
+            --main-class opencutter.ui.App \
+            --dest dist \
+            --app-version "${{ steps.ver.outputs.version }}" \
+            --vendor "OpenCutter" \
+            --java-options "--enable-native-access=ALL-UNNAMED"
+
+      - name: Zip the app
+        shell: pwsh
+        run: Compress-Archive -Path dist/OpenCutter -DestinationPath "OpenCutter-${{ steps.ver.outputs.version }}-win64.zip" -Force
+
+      - name: Stage the runnable jar
+        shell: bash
+        run: cp app/target/OpenCutter.jar OpenCutter.jar
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            OpenCutter-${{ steps.ver.outputs.version }}-win64.zip
+            OpenCutter.jar
+          generate_release_notes: true
+          body: |
+            ## OpenCutter ${{ steps.ver.outputs.version }}
+
+            **Most people want the self-contained app — no Java needed:**
+            - Download **`OpenCutter-${{ steps.ver.outputs.version }}-win64.zip`**, extract it, and run `OpenCutter.exe`.
+            - Windows SmartScreen may warn (the app is unsigned): **More info → Run anyway**.
+
+            **If you already have a JDK 21+** you can instead run the bare jar:
+            `java -jar OpenCutter.jar`
+
+            Built for the **Cricut Explore Air 2** (USB and Bluetooth). See the
+            [README](https://github.com/jpechart/opencutter#readme) and
+            [docs/USAGE.md](https://github.com/jpechart/opencutter/blob/main/docs/USAGE.md).
