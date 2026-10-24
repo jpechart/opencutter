@@ -7,8 +7,16 @@ import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDResources;
+import org.apache.pdfbox.pdmodel.font.PDFont;
+import org.apache.pdfbox.pdmodel.font.PDVectorFont;
 import org.apache.pdfbox.pdmodel.graphics.optionalcontent.PDOptionalContentGroup;
+import org.apache.pdfbox.pdmodel.graphics.state.RenderingMode;
+import org.apache.pdfbox.util.Matrix;
+import org.apache.pdfbox.util.Vector;
 
+import java.awt.geom.AffineTransform;
+import java.awt.geom.GeneralPath;
+import java.awt.geom.PathIterator;
 import java.awt.geom.Point2D;
 import java.io.File;
 import java.io.IOException;
@@ -24,7 +32,8 @@ import java.util.List;
  *
  * Path semantics follow PDF: a path may contain several subpaths (compound paths, text outlines),
  * and it only becomes a cut when a painting operator (S, f, B, …) consumes it. Paths that end in
- * {@code n} (clipping only) are discarded.
+ * {@code n} (clipping only) are discarded. Live (unconverted) text is cut along its glyph outlines;
+ * invisible text is skipped.
  */
 public final class CutImporter extends PDFGraphicsStreamEngine {
 
@@ -34,6 +43,8 @@ public final class CutImporter extends PDFGraphicsStreamEngine {
 
     /** Max chord deviation when flattening curves, in PDF points (~0.1 mm). */
     private static final double FLATTEN_TOL_PT = 0.3;
+    /** Glyph contours smaller than this in both directions (inches) are dropped. */
+    private static final double MIN_CONTOUR_IN = 0.005;
 
     public static final class Result {
         public final List<List<double[]>> polylines;  // each: list of {x,y} in machine inches
@@ -41,8 +52,10 @@ public final class CutImporter extends PDFGraphicsStreamEngine {
         public final double offX, offY;                // mat-origin offset already applied, inches
         public final double[] bbox;                    // x0,y0,x1,y1 machine inches
         public final int pageCount;
-        Result(List<List<double[]>> p, double w, double h, double ox, double oy, double[] b, int pages) {
+        public final String layer;                     // layer actually cut; null = all paths (no such layer)
+        Result(List<List<double[]>> p, double w, double h, double ox, double oy, double[] b, int pages, String layer) {
             polylines = p; sheetWin = w; sheetHin = h; offX = ox; offY = oy; bbox = b; pageCount = pages;
+            this.layer = layer;
         }
         public int pointCount() { int n = 0; for (List<double[]> pl : polylines) n += pl.size(); return n; }
     }
@@ -62,8 +75,13 @@ public final class CutImporter extends PDFGraphicsStreamEngine {
         this.pageH = page.getMediaBox().getHeight();
     }
 
+    /**
+     * Cuts the paths on {@code layer}. If the PDF has no layer by that name (e.g. Inkscape exports, which
+     * don't write layers), every vector path on the page is cut instead; {@link Result#layer} is then null.
+     */
     public static Result importCuts(String path, String layer, double offX, double offY) throws IOException {
         try (PDDocument doc = Loader.loadPDF(new File(path))) {
+            if (layer != null && !hasLayer(doc, layer)) layer = null;
             PDPage page = doc.getPage(0);
             CutImporter imp = new CutImporter(page, layer, offX, offY);
             imp.processPage(page);
@@ -75,8 +93,13 @@ public final class CutImporter extends PDFGraphicsStreamEngine {
                 x1 = Math.max(x1, pt[0]); y1 = Math.max(y1, pt[1]);
             }
             double w = page.getMediaBox().getWidth() * PT, h = page.getMediaBox().getHeight() * PT;
-            return new Result(imp.out, w, h, offX, offY, new double[]{x0, y0, x1, y1}, doc.getNumberOfPages());
+            return new Result(imp.out, w, h, offX, offY, new double[]{x0, y0, x1, y1}, doc.getNumberOfPages(), layer);
         }
+    }
+
+    private static boolean hasLayer(PDDocument doc, String name) {
+        var ocp = doc.getDocumentCatalog().getOCProperties();
+        return ocp != null && ocp.hasGroup(name);
     }
 
     public static Result importCuts(String path) throws IOException {
@@ -195,6 +218,41 @@ public final class CutImporter extends PDFGraphicsStreamEngine {
     }
 
     private void discard() { pending.clear(); current = new ArrayList<>(); }
+
+    // --- live text: cut each glyph's outline (Type 3 glyphs arrive as ordinary paths via the engine) ---
+    @Override
+    protected void showFontGlyph(Matrix trm, PDFont font, int code, Vector displacement) throws IOException {
+        RenderingMode mode = getGraphicsState().getTextState().getRenderingMode();
+        if (!mode.isFill() && !mode.isStroke()) return;          // invisible / clip-only text (e.g. OCR layers)
+        if (!inTargetLayer() || !(font instanceof PDVectorFont vf)) return;
+        GeneralPath glyph = vf.getNormalizedPath(code);
+        if (glyph == null) return;
+        AffineTransform at = trm.createAffineTransform();       // text space -> page space
+        at.concatenate(font.getFontMatrix().createAffineTransform());
+        List<double[]> sub = null;
+        double[] c = new double[6];
+        for (PathIterator it = glyph.getPathIterator(at, FLATTEN_TOL_PT); !it.isDone(); it.next()) {
+            switch (it.currentSegment(c)) {
+                case PathIterator.SEG_MOVETO -> { addGlyphContour(sub); sub = new ArrayList<>(); sub.add(m(c[0], c[1])); }
+                case PathIterator.SEG_LINETO -> { if (sub != null) sub.add(m(c[0], c[1])); }
+                case PathIterator.SEG_CLOSE -> {
+                    if (sub != null && sub.size() > 1) sub.add(sub.get(0).clone());
+                    addGlyphContour(sub); sub = null;
+                }
+                default -> {}   // flattened iterator yields no curves
+            }
+        }
+        addGlyphContour(sub);
+    }
+
+    /** Keep a glyph contour unless it's degenerate (some fonts carry zero-size stray points: a blade plunge for nothing). */
+    private void addGlyphContour(List<double[]> sub) {
+        if (sub == null || sub.size() < 2) return;
+        double x0 = Double.MAX_VALUE, y0 = Double.MAX_VALUE, x1 = -Double.MAX_VALUE, y1 = -Double.MAX_VALUE;
+        for (double[] p : sub) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+        if (x1 - x0 < MIN_CONTOUR_IN && y1 - y0 < MIN_CONTOUR_IN) return;
+        out.add(sub);
+    }
 
     // --- unused abstract methods ---
     @Override public void drawImage(org.apache.pdfbox.pdmodel.graphics.image.PDImage i) {}

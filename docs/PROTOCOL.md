@@ -73,13 +73,21 @@ Plaintext / read-only:
 | `0x71 0f` | clear button-press bits | |
 | `0x84 03` | unload mat | |
 | `0x68` | abort / finish | |
+| `0xB9` | read carriage position | reply `b9 <x f32 BE> <y f32 BE>` in inches; at rest ≈ (4.06, 0) |
 
 Status reply body (len stripped): `[0x73][lights][buttons][0x03][progress][dial]`.
 Lights bits: `0x20` Load, `0x10` mat loaded, `0x08` Go-blink, `0x04` Go-solid. Buttons: `0x04` Load, `0x02` Go.
 
-Encrypted cut sequence (per job): `EndDraw 0x22`, geometry `0x31`, `SetMachineState 0x30`
-(pressure = last 2 bytes, big-endian), speed registers `0xA1` ×4, `BeginDraw 0x21`, `OrientBlade 0x76`,
-then `MultiDrawVector 0x43` frames, `EndDraw 0x22`.
+After Go is pressed: `0x68` AbortCutting (resets the cut state) and lights `72 01 01`, then the
+encrypted cut sequence (per job): `EndDraw 0x22`, `SetMachineState 0x30` (pressure = last 2 bytes,
+big-endian), geometry `0x31`, speed registers `0xA1` ×4, `BeginDraw 0x21`, `EndDraw 0x22`,
+`OrientBlade 0x76`, `BeginDraw 0x21`, then `MultiDrawVector 0x43` frames, `EndDraw 0x22`.
+
+The job then **parks the carriage** in a separate draw section: `BeginDraw 0x21`, one `0x43` frame of two
+MOVE entries to (4.0, 0.0), `EndDraw 0x22`. Skipping the park leaves the head at the last cut point, and
+repeated jobs creep toward the end stop until the machine faults (red power light). (4.0, 0) is the
+machine's own rest position — `0xB9` reads ≈ (4.06, 0) right after power-on — so OpenCutter polls `0xB9`
+to know when the queued cut has really finished and the head is home.
 
 `MultiDrawVector` entries are 9 bytes each: `[type][x float32 LE][y float32 LE]`, coordinates in
 **inches**, `type` 2 = move (blade up), 0 = line (blade down). Keep ≤ 13 vectors per frame (128-byte

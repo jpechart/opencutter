@@ -59,6 +59,16 @@ public final class Session implements AutoCloseable {
 
     public byte[] abort() { return query(0x68, new byte[0], 1000); }
 
+    /** ReadPositionFloat 0xB9: carriage position {x, y} in machine inches, or null if no valid reply. */
+    public double[] position() { return parsePosition(query(0xB9, new byte[0], 600)); }
+
+    /** Reply body {@code b9 <x f32 BE> <y f32 BE>}; e.g. a machine at rest reads about (4.06, 0). */
+    static double[] parsePosition(byte[] b) {
+        if (b.length < 9 || (b[0] & 0xFF) != 0xB9) return null;
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(b, 1, 8);   // big-endian by default
+        return new double[]{bb.getFloat(), bb.getFloat()};
+    }
+
     // --- NewAES handshake: derive the session key ourselves ---
 
     public byte[] handshake() { return handshake(7); }

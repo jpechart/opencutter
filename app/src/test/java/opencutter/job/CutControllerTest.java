@@ -29,6 +29,11 @@ class CutControllerTest {
         assertArrayEquals(hex("00000040"), java.util.Arrays.copyOfRange(e.get(0), 5, 9)); // 2.0f LE
     }
 
+    /** Issue #3: byte-identical to the park frame Design Space sends after every job. */
+    @Test void parkFrameMatchesDesignSpace() {
+        assertArrayEquals(hex("020000804000000000" + "020000804000000000"), CutController.parkFrame());
+    }
+
     @Test void chunkNeverExceedsOneEncryptedBlock() {
         List<byte[]> entries = CutController.vectorEntries(List.of(
                 java.util.Collections.nCopies(30, new double[]{0, 0})));

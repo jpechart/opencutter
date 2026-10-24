@@ -94,10 +94,66 @@ class CutImporterTest {
         // curve got flattened finely (two big arcs => well over the old fixed 16 points)
         assertTrue(r.polylines.get(3).size() > 20);
 
+        assertEquals("Cut Layer", r.layer);
         // all layers: the print-layer rect is included too
         assertEquals(5, CutImporter.importCuts(pdf.getPath(), null, 0, 0).polylines.size());
-        // wrong layer name: nothing
-        assertThrows(IOException.class, () -> CutImporter.importCuts(pdf.getPath(), "Nope", 0, 0));
+        // no layer by that name: fall back to every path
+        CutImporter.Result fb = CutImporter.importCuts(pdf.getPath(), "Nope", 0, 0);
+        assertEquals(5, fb.polylines.size());
+        assertNull(fb.layer);
+    }
+
+    /** Issue #2: Inkscape-style PDF with no optional-content layers at all -> cut everything. */
+    @Test void pdfWithoutLayersCutsAllPaths(@TempDir Path tmp) throws IOException {
+        File pdf = tmp.resolve("nolayers.pdf").toFile();
+        try (PDDocument doc = new PDDocument()) {
+            PDPage page = new PDPage(PDRectangle.LETTER);
+            doc.addPage(page);
+            try (PDPageContentStream cs = new PDPageContentStream(doc, page)) {
+                cs.moveTo(100, 100); cs.lineTo(200, 100); cs.lineTo(150, 200); cs.closePath(); cs.stroke();
+                cs.addRect(300, 300, 50, 50); cs.fill();
+            }
+            doc.save(pdf);
+        }
+        CutImporter.Result r = CutImporter.importCuts(pdf.getPath());
+        assertEquals(2, r.polylines.size());
+        assertNull(r.layer);
+    }
+
+    /** Live text is cut along its glyph outlines; invisible text and text off the cut layer are not. */
+    @Test void liveTextIsCutAsOutlines(@TempDir Path tmp) throws IOException {
+        File pdf = tmp.resolve("text.pdf").toFile();
+        try (PDDocument doc = new PDDocument()) {
+            PDPage page = new PDPage(PDRectangle.LETTER);
+            doc.addPage(page);
+            PDOptionalContentGroup cut = new PDOptionalContentGroup("Cut Layer");
+            PDOptionalContentGroup print = new PDOptionalContentGroup("Print Layer");
+            PDOptionalContentProperties ocp = new PDOptionalContentProperties();
+            ocp.addGroup(cut); ocp.addGroup(print);
+            doc.getDocumentCatalog().setOCProperties(ocp);
+            page.setResources(new PDResources());
+            var helv = new org.apache.pdfbox.pdmodel.font.PDType1Font(
+                    org.apache.pdfbox.pdmodel.font.Standard14Fonts.FontName.HELVETICA_BOLD);
+            try (PDPageContentStream cs = new PDPageContentStream(doc, page)) {
+                cs.beginMarkedContent(COSName.OC, cut);
+                cs.beginText(); cs.setFont(helv, 72); cs.newLineAtOffset(72, 600); cs.showText("HO"); cs.endText();
+                cs.beginText(); cs.setFont(helv, 72);                       // OCR-style invisible text
+                cs.setRenderingMode(org.apache.pdfbox.pdmodel.graphics.state.RenderingMode.NEITHER);
+                cs.newLineAtOffset(72, 300); cs.showText("XX"); cs.endText();
+                cs.endMarkedContent();
+                cs.beginMarkedContent(COSName.OC, print);
+                cs.beginText(); cs.setFont(helv, 72); cs.newLineAtOffset(300, 100); cs.showText("ZZ"); cs.endText();
+                cs.endMarkedContent();
+            }
+            doc.save(pdf);
+        }
+        CutImporter.Result r = CutImporter.importCuts(pdf.getPath(), "Cut Layer", 0, 0);
+        // H = 1 contour, O = 2 (outer + counter)
+        assertEquals(3, r.polylines.size());
+        // starts 1 in from the left; baseline 600 pt from the bottom -> cap height ~0.7 in above it
+        assertEquals(1.0, r.bbox[0], 0.1);
+        assertEquals((792 - 600) / 72.0, r.bbox[3], 0.04);   // round letters overshoot the baseline slightly
+        assertTrue(r.bbox[1] < r.bbox[3] - 0.6, "glyphs are ~0.7 in tall");
     }
 
     @Test void flatteningScalesWithCurveSize() {

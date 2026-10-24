@@ -33,8 +33,13 @@ public final class App extends JFrame {
     private final JLabel fileLabel = new JLabel("No file loaded");
     private final PreviewPanel preview = new PreviewPanel();
     private final JButton startBtn = new JButton("START");
-    private final JButton doneBtn = new JButton("Done / Unload");
+    private final JButton doneBtn = new JButton("Unload");
     private volatile boolean scanning = false;
+    private volatile Boolean matLoaded = null;      // last known mat state; null = unknown
+    private volatile CutController.Status jobStatus = CutController.Status.IDLE;
+    private volatile boolean busy = false;          // an unload/disconnect is in progress
+    private volatile boolean polling = false;
+    private int missedPolls = 0;                    // EDT only
     private final JProgressBar progress = new JProgressBar();
     private final JTextArea log = new JTextArea(8, 40);
 
@@ -53,6 +58,7 @@ public final class App extends JFrame {
 
         wireActions();
         startDiscovery();
+        startStatePolling();
         updateEnabled();
         setSize(760, 640);
         setLocationRelativeTo(null);
@@ -102,7 +108,7 @@ public final class App extends JFrame {
     }
 
     private void wireActions() {
-        connectBtn.addActionListener(e -> connect());
+        connectBtn.addActionListener(e -> { if (session != null) disconnect(null); else connect(); });
         loadFileBtn.addActionListener(e -> chooseFile());
         startBtn.addActionListener(e -> start());
         doneBtn.addActionListener(e -> done());
@@ -121,6 +127,52 @@ public final class App extends JFrame {
                 } finally { scanning = false; }
             });
         }).start();
+    }
+
+    /**
+     * While connected and idle, poll the machine once a second: keeps the Unload button in step with the
+     * mat (including one loaded with the machine's own Load button) and notices a machine that went away.
+     */
+    private void startStatePolling() {
+        new Timer(1000, e -> {
+            CutController c = controller;
+            if (c == null || c.isRunning() || busy || polling) return;
+            polling = true;
+            runBg(() -> {
+                Boolean m = null;
+                try { m = c.matLoaded(); } catch (Exception ignored) {}
+                final Boolean mat = m;
+                ui(() -> {
+                    polling = false;
+                    if (c != controller) return;                 // disconnected meanwhile
+                    if (mat == null) {
+                        if (++missedPolls >= 3) disconnect("Lost contact with the machine.\n\n"
+                                + "If its power light is red, switch it off and on again, then click Connect.");
+                        return;
+                    }
+                    missedPolls = 0;
+                    if (!mat.equals(matLoaded)) { matLoaded = mat; updateEnabled(); }
+                });
+            });
+        }).start();
+    }
+
+    /** Drop the link (Disconnect button, or the machine went away). reason != null shows it to the user. */
+    private void disconnect(String reason) {
+        CutController c = controller;
+        Session sess = session;
+        controller = null; session = null; connected = null;
+        matLoaded = null; missedPolls = 0; jobStatus = CutController.Status.IDLE;
+        busy = true;
+        connState.setText(reason != null ? "Disconnected — machine not responding" : "No machine connected");
+        appendLog(reason != null ? "lost contact with the machine; disconnected" : "disconnected");
+        progress.setValue(0); progress.setString("");
+        updateEnabled();
+        runBg(() -> {
+            try { if (c != null) c.stop(); } catch (Exception ignored) {}
+            try { if (sess != null) sess.close(); } catch (Exception ignored) {}
+            ui(() -> { busy = false; updateEnabled(); if (reason != null) msg(reason); });
+        });
     }
 
     private void applyScan(List<Device> found) {
@@ -147,9 +199,11 @@ public final class App extends JFrame {
                         : Session.usb(d.address(), Protocol.kekForType(d.machineType()));
                 sess.handshake();
                 byte[] status = sess.machineStatus();
+                double[] pos = sess.position();
                 this.session = sess; this.connected = d;
                 this.controller = new CutController(sess, new UiListener());
                 ui(() -> { connState.setText("Connected: " + d.display());
+                           if (pos != null) appendLog(String.format("carriage at (%.3f, %.3f)", pos[0], pos[1]));
                            appendLog("connected, session ready; machine status " + Protocol.hex(status));
                            updateEnabled(); });
             } catch (Exception ex) {
@@ -172,11 +226,16 @@ public final class App extends JFrame {
                 CutImporter.Result r = CutImporter.importCuts(f.getAbsolutePath());
                 this.job = r; this.jobFile = f;
                 ui(() -> {
-                    fileLabel.setText(f.getName() + "  —  " + r.polylines.size() + " cuts, sheet "
-                            + round(r.sheetWin) + "×" + round(r.sheetHin) + " in");
+                    fileLabel.setText("<html>" + esc(f.getName()) + "  —  " + r.polylines.size() + " cuts, sheet "
+                            + round(r.sheetWin) + "×" + round(r.sheetHin) + " in"
+                            + (r.layer != null ? ", layer “" + esc(r.layer) + "”"
+                               : "<br><b>No “" + CutImporter.DEFAULT_LAYER + "” layer — cutting everything on the page.</b>")
+                            + "</html>");
                     preview.setJob(r);
                     appendLog("loaded " + f.getName() + ": " + r.polylines.size() + " cut paths, "
-                            + r.pointCount() + " points");
+                            + r.pointCount() + " points"
+                            + (r.layer != null ? " (layer '" + r.layer + "')"
+                                               : " (no '" + CutImporter.DEFAULT_LAYER + "' layer; cutting all paths)"));
                     if (r.pageCount > 1) appendLog("note: PDF has " + r.pageCount + " pages; only page 1 is used");
                     updateEnabled();
                 });
@@ -202,7 +261,7 @@ public final class App extends JFrame {
                 runBg(() -> {
                     try { controller.run(j.polylines, p); }
                     catch (Exception ex) { ui(() -> { msg("Cut error: " + ex.getMessage()); appendLog("ERROR " + ex); }); }
-                    finally { ui(() -> { startBtn.setEnabled(session != null && job != null); doneBtn.setText("Done / Unload"); }); }
+                    finally { ui(this::updateEnabled); }
                 });
             });
         });
@@ -242,14 +301,25 @@ public final class App extends JFrame {
             : Presets.dialPressure(dial, (Presets.Level) level.getSelectedItem());
     }
 
-    /** "Done / Unload" after a cut, "Stop / Unload" during one: stops the job, clears lights, ejects the mat. */
+    /**
+     * "Unload" with a mat in, "Stop / Unload" during a cut, "Cancel" at the Load prompt: stops any job,
+     * sends the head home, clears the lights and ejects the mat (if there is one).
+     */
     private void done() {
-        if (controller == null) return;
-        doneBtn.setEnabled(false);
+        CutController c = controller;
+        if (c == null) return;
+        if (c.isRunning() && cutting()
+                && JOptionPane.showConfirmDialog(this,
+                        "Stop the cut?\n\nAnything not cut yet will be skipped, the head returns home and the mat ejects.",
+                        "Stop cutting", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE) != JOptionPane.YES_OPTION)
+            return;
+        busy = true;
+        updateEnabled();
         runBg(() -> {
-            try { controller.finish(); }
+            try { c.finish(); }
             catch (Exception ex) { ui(() -> appendLog("ERROR during unload: " + ex)); }
-            finally { ui(() -> { progress.setValue(0); progress.setString(""); updateEnabled(); }); }
+            finally { ui(() -> { busy = false; matLoaded = false; progress.setValue(0); progress.setString("");
+                                 updateEnabled(); }); }
         });
     }
 
@@ -269,21 +339,40 @@ public final class App extends JFrame {
 
     private void updateEnabled() {
         boolean conn = session != null;
-        connectBtn.setEnabled(!conn && deviceList.getSelectedValue() != null);
+        boolean running = controller != null && controller.isRunning();
+        connectBtn.setText(conn ? "Disconnect" : "Connect");
+        connectBtn.setEnabled(!busy && (conn || deviceList.getSelectedValue() != null));
         loadFileBtn.setEnabled(conn);
-        startBtn.setEnabled(conn && job != null && (controller == null || !controller.isRunning()));
-        doneBtn.setEnabled(conn);
-        doneBtn.setText(controller != null && controller.isRunning() ? "Stop / Unload" : "Done / Unload");
+        startBtn.setEnabled(conn && !busy && job != null && !running);
+        if (running && jobStatus == CutController.Status.WAITING_LOAD) {
+            doneBtn.setText("Cancel");                 // nothing loaded yet: just back out
+            doneBtn.setEnabled(!busy);
+        } else if (running && cutting()) {
+            doneBtn.setText("Stop");                   // emergency stop only (confirmed); Unload comes after Done
+            doneBtn.setEnabled(!busy);
+        } else if (running) {
+            doneBtn.setText("Stop / Unload");          // mat in, waiting for Go: nothing cut yet
+            doneBtn.setEnabled(!busy);
+        } else {
+            doneBtn.setText("Unload");                 // only with a mat actually in the machine
+            doneBtn.setEnabled(conn && !busy && Boolean.TRUE.equals(matLoaded));
+        }
     }
 
     private final class UiListener implements CutController.Listener {
         public void onStatus(CutController.Status s) {
+            jobStatus = s;
             ui(() -> { appendLog("[" + s + "]");
-                if (s == CutController.Status.WAITING_LOAD) { progress.setString("Load the mat (Load is blinking)"); doneBtn.setText("Stop / Unload"); }
-                else if (s == CutController.Status.WAITING_GO) progress.setString("Press Go on the machine");
-                else if (s == CutController.Status.CUTTING) progress.setString("Cutting…");
-                else if (s == CutController.Status.DONE) progress.setString("Done — click Done / Unload to eject the mat");
-                else if (s == CutController.Status.STOPPED) progress.setString("Stopped");
+                switch (s) {
+                    case WAITING_LOAD -> progress.setString("Load the mat (Load is blinking)");
+                    case WAITING_GO -> { matLoaded = true; progress.setString("Press Go on the machine"); }
+                    case CUTTING -> progress.setString("Cutting…");
+                    // every frame is sent, but the machine is still cutting what it has queued
+                    case FINISHING -> progress.setString("Cutting the last lines — wait for Done…");
+                    case DONE -> progress.setString("Done — click Unload to eject the mat");
+                    case STOPPED -> progress.setString("Stopped");
+                    default -> {}
+                }
                 updateEnabled();
             });
         }
@@ -299,6 +388,12 @@ public final class App extends JFrame {
     private void ui(Runnable r) { SwingUtilities.invokeLater(r); }
     private void runBg(Runnable r) { Thread t = new Thread(r, "opencutter-bg"); t.setDaemon(true); t.start(); }
     private static String round(double v) { return String.valueOf(Math.round(v * 100) / 100.0); }
+    /** The blade is (or may still be) moving: the cut proper, or the queued last lines. */
+    private boolean cutting() {
+        return jobStatus == CutController.Status.CUTTING || jobStatus == CutController.Status.FINISHING;
+    }
+
+    private static String esc(String s) { return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"); }
 
     public static void main(String[] args) {
         prepareNativeDir();

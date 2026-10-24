@@ -23,7 +23,8 @@ at that same point on the sheet. What you design is what it cuts.
 
 - Direct control of the Explore Air 2 — **no Design Space required at runtime**
 - **USB** and **Bluetooth** (the app makes the Bluetooth connection itself)
-- Loads a **PDF** and cuts the paths on a layer named **`Cut Layer`** (or all paths if there's no such layer)
+- Loads a **PDF** and cuts the paths on a layer named **`Cut Layer`** (or everything on the page if there's
+  no such layer — e.g. Inkscape PDFs). Text is cut along its letter outlines.
 - Exact placement: the page *is* the sheet, in real inches
 - Material + pressure presets matching the machine's dial (Paper − … Poster Board +, with Less/Default/More)
 - Live FIFO flow control so large jobs don't drop commands

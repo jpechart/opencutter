@@ -78,4 +78,16 @@ class ProtocolTest {
         assertEquals("de ad be ef", hex(hex("DE AD be ef")));
         assertEquals("de ad", hex(hex("deadbeef"), 2));
     }
+
+    /** ReadPositionFloat replies captured from the machine (big-endian floats x, y). */
+    @Test void parsesCarriagePosition() {
+        double[] p = Session.parsePosition(hex("b9 40 81 d8 3c 00 00 00 00"));   // at rest after power-on
+        assertEquals(4.0576, p[0], 1e-4);
+        assertEquals(0.0, p[1], 0);
+        double[] q = Session.parsePosition(hex("b9 40 7f fd 61 bf 86 8b 01"));
+        assertEquals(3.9998, q[0], 1e-4);
+        assertEquals(-1.0511, q[1], 1e-4);
+        assertNull(Session.parsePosition(hex("73 00 00 03 00 01")));
+        assertNull(Session.parsePosition(new byte[0]));
+    }
 }

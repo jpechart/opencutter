@@ -17,7 +17,10 @@ public final class SerialLink implements Link {
         port.flushIOBuffers();
     }
 
-    public void write(byte[] data) { port.writeBytes(data, data.length); }
+    public void write(byte[] data) {
+        // -1 when the port has gone away (machine powered off / unplugged); surface it so the UI can disconnect.
+        if (port.writeBytes(data, data.length) < 0) throw new IllegalStateException("USB link lost");
+    }
 
     public byte[] readReply(long maxMillis) {
         ByteArrayOutputStream buf = new ByteArrayOutputStream();
